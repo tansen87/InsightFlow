@@ -1,7 +1,8 @@
-use std::{error::Error, fs::File, io::Read, path::Path};
+use std::{fs::File, io::Read, path::Path};
 
 use anyhow::{Result, anyhow};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
+use pinyin::ToPinyin;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -483,12 +484,12 @@ fn process_operations(
 
     // 加入所有 string 新字段名
     for string_op in &context.string_ops {
-        let string_name = if let Some(ref alias) = string_op.replacement {
-            alias.clone()
-        } else {
-            format!("{}_{}", string_op.column, string_op.mode)
-        };
-        selected_headers.push(string_name);
+      let string_name = if let Some(ref alias) = string_op.replacement {
+        alias.clone()
+      } else {
+        format!("{}_{}", string_op.column, string_op.mode)
+      };
+      selected_headers.push(string_name);
     }
 
     writer.write_record(&selected_headers)?;
@@ -560,6 +561,23 @@ fn process_operations(
       if let Some(idx) = headers.iter().position(|h| h == &string_op.column) {
         let cell = record.get(idx).unwrap_or("").to_string();
         let new_val = match string_op.mode.as_str() {
+          "pinyin" => {
+            let py_mode_string = string_op.replacement.clone().unwrap_or("none".to_owned());
+            let py_mode = py_mode_string.as_str();
+            cell
+              .chars()
+              .map(|c| {
+                c.to_pinyin().map_or_else(
+                  || c.to_string(),
+                  |py| match py_mode {
+                    "upper" => py.plain().to_uppercase(),
+                    "lower" => py.plain().to_lowercase(),
+                    _ => py.plain().to_string(),
+                  },
+                )
+              })
+              .collect()
+          }
           "lower" => cell.to_lowercase(),
           "upper" => cell.to_uppercase(),
           "trim" => cell.trim().to_string(),
@@ -631,7 +649,7 @@ fn process_operations(
   Ok(())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
   // let operations = vec![
   //     Operation {
   //         op: "select".to_string(),
