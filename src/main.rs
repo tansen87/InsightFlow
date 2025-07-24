@@ -31,6 +31,7 @@ struct StringOperation {
   mode: String,
   comparand: Option<String>,
   replacement: Option<String>,
+  alias: Option<String>,
 }
 
 struct ProcessingContext {
@@ -91,12 +92,14 @@ impl ProcessingContext {
     mode: &str,
     comparand: Option<String>,
     replacement: Option<String>,
+    alias: Option<String>,
   ) {
     self.string_ops.push(StringOperation {
       column: column.to_string(),
       mode: mode.to_string(),
       comparand,
       replacement,
+      alias,
     });
   }
 
@@ -444,7 +447,13 @@ fn process_operations(
       }
       "string" => {
         if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
-          context.add_string(col, mode, op.comparand.clone(), op.replacement.clone());
+          context.add_string(
+            col,
+            mode,
+            op.comparand.clone(),
+            op.replacement.clone(),
+            op.alias.clone(),
+          );
         }
       }
       _ => return Err(anyhow!("not support operation: {}", op.op)),
@@ -484,7 +493,7 @@ fn process_operations(
 
     // 加入所有 string 新字段名
     for string_op in &context.string_ops {
-      let string_name = if let Some(ref alias) = string_op.replacement {
+      let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
       } else {
         format!("{}_{}", string_op.column, string_op.mode)
@@ -505,7 +514,7 @@ fn process_operations(
     }
 
     for string_op in &context.string_ops {
-      let string_name = if let Some(ref alias) = string_op.replacement {
+      let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
       } else {
         format!("{}_{}", string_op.column, string_op.mode)
