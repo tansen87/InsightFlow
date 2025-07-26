@@ -142,18 +142,18 @@ fn not_equal_filter(
 
 fn contains_filter(
   column: &str,
-  substring: &str,
+  value: &str,
   headers: &[String],
 ) -> Result<impl Fn(&StringRecord) -> bool + use<>> {
-  let column_idx = headers
+  let idx = headers
     .iter()
     .position(|h| h == column)
     .ok_or_else(|| anyhow!("Column not found: {}", column))?;
-  let substring = substring.to_string();
+  let values: Vec<String> = value.split('|').map(|s| s.to_string()).collect();
   Ok(move |record: &StringRecord| {
     record
-      .get(column_idx)
-      .map_or(false, |field| field.contains(&substring))
+      .get(idx)
+      .map_or(false, |field| values.iter().any(|val| field.contains(val)))
   })
 }
 
@@ -378,6 +378,23 @@ fn between_filter(
   })
 }
 
+fn is_in_filter(
+  column: &str,
+  value: &str,
+  headers: &[String],
+) -> Result<impl Fn(&StringRecord) -> bool + use<>> {
+  let idx = headers
+    .iter()
+    .position(|h| h == column)
+    .ok_or_else(|| anyhow!("Column not found: {}", column))?;
+  let values: Vec<String> = value.split('|').map(|s| s.to_string()).collect();
+  Ok(move |record: &StringRecord| {
+    record
+      .get(idx)
+      .map_or(false, |field| values.contains(&field.to_string()))
+  })
+}
+
 fn process_operations(
   input_path: &Path,
   operations: &[Operation],
@@ -428,12 +445,9 @@ fn process_operations(
             "lt" => context.add_filter(lt_filter(col, val, &headers)?),
             "le" => context.add_filter(le_filter(col, val, &headers)?),
             "between" => context.add_filter(between_filter(col, val, &headers)?),
-            _ => return Err(anyhow!("not support filter mode: {}", mode)),
-          }
-        } else if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
-          match mode.as_str() {
             "is_null" => context.add_filter(is_null_filter(col, &headers)?),
             "is_not_null" => context.add_filter(is_not_null_filter(col, &headers)?),
+            "is_in" => context.add_filter(is_in_filter(col, val, &headers)?),
             _ => return Err(anyhow!("not support filter mode: {}", mode)),
           }
         }
@@ -498,7 +512,7 @@ fn process_operations(
     for string_op in &context.string_ops {
       // 这些操作不新增列，而是就地修改
       if string_op.mode == "fill"
-        || string_op.mode == "f-fill"
+        || string_op.mode == "f_fill"
         || string_op.mode == "lower"
         || string_op.mode == "upper"
         || string_op.mode == "trim"
@@ -529,10 +543,10 @@ fn process_operations(
       selected_headers.push(slice_name);
     }
 
-    // 只为非 fill/f-fill 的 string_ops 新增列
+    // 只为非 fill/f_fill 的 string_ops 新增列
     for string_op in &context.string_ops {
       if string_op.mode == "fill"
-        || string_op.mode == "f-fill"
+        || string_op.mode == "f_fill"
         || string_op.mode == "lower"
         || string_op.mode == "upper"
         || string_op.mode == "trim"
@@ -565,7 +579,7 @@ fn process_operations(
 
     for string_op in &context.string_ops {
       if string_op.mode == "fill"
-        || string_op.mode == "f-fill"
+        || string_op.mode == "f_fill"
         || string_op.mode == "lower"
         || string_op.mode == "upper"
         || string_op.mode == "trim"
@@ -588,7 +602,7 @@ fn process_operations(
   }
 
   // 流式处理所有记录
-  // 初始化 f-fill 缓存（每个 string_op 一个）
+  // 初始化 f_fill 缓存（每个 string_op 一个）
   let mut ffill_caches: Vec<Option<String>> = vec![None; context.string_ops.len()];
 
   for result in reader.records() {
@@ -642,7 +656,7 @@ fn process_operations(
               row_fields[idx] = string_op.replacement.clone().unwrap_or_default();
             }
           }
-          "f-fill" => {
+          "f_fill" => {
             if cell.is_empty() {
               if let Some(ref cache_val) = ffill_caches[i] {
                 row_fields[idx] = cache_val.clone();
@@ -718,7 +732,7 @@ fn process_operations(
       } else {
         // 字段找不到时，只有新增列的操作才追加空字符串
         if string_op.mode != "fill"
-          && string_op.mode != "f-fill"
+          && string_op.mode != "f_fill"
           && string_op.mode != "lower"
           && string_op.mode != "upper"
           && string_op.mode != "trim"
