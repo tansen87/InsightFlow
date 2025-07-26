@@ -445,7 +445,7 @@ fn process_operations(
           context.add_slice(col, mode, offset, length, op.alias.clone());
         }
       }
-      "string" => {
+      "str" => {
         if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
           context.add_string(
             col,
@@ -481,6 +481,35 @@ fn process_operations(
       }
     }
 
+    // 收集所有 slice 和 string 新字段名及其值的生成方式
+    let mut new_field_names = Vec::new();
+    let mut new_field_is_slice = Vec::new(); // true=slice, false=string
+    let mut new_field_aliases = Vec::new();
+    for slice_op in &context.slice_ops {
+      let slice_name = if let Some(ref alias) = slice_op.alias {
+        alias.clone()
+      } else {
+        format!("{}_{}", slice_op.column, slice_op.mode)
+      };
+      new_field_names.push(slice_name.clone());
+      new_field_is_slice.push(true);
+      new_field_aliases.push(slice_name);
+    }
+    for string_op in &context.string_ops {
+      // fill 和 f-fill 不新增列
+      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+        continue;
+      }
+      let string_name = if let Some(ref alias) = string_op.alias {
+        alias.clone()
+      } else {
+        format!("{}_{}", string_op.column, string_op.mode)
+      };
+      new_field_names.push(string_name.clone());
+      new_field_is_slice.push(false);
+      new_field_aliases.push(string_name);
+    }
+
     // 加入所有 slice 新字段名
     for slice_op in &context.slice_ops {
       let slice_name = if let Some(ref alias) = slice_op.alias {
@@ -491,8 +520,11 @@ fn process_operations(
       selected_headers.push(slice_name);
     }
 
-    // 加入所有 string 新字段名
+    // 只为非 fill/f-fill 的 string_ops 新增列
     for string_op in &context.string_ops {
+      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+        continue;
+      }
       let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
       } else {
@@ -514,6 +546,9 @@ fn process_operations(
     }
 
     for string_op in &context.string_ops {
+      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+        continue;
+      }
       let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
       } else {
@@ -526,6 +561,9 @@ fn process_operations(
   }
 
   // 流式处理所有记录
+  // 初始化 f-fill 缓存（每个 string_op 一个）
+  let mut ffill_caches: Vec<Option<String>> = vec![None; context.string_ops.len()];
+
   for result in reader.records() {
     let record = result?;
 
@@ -536,11 +574,11 @@ fn process_operations(
       if let Some(idx) = idx {
         if let Some(val) = record.get(idx) {
           let new_val = match slice_op.mode.as_str() {
-            "left" => val.chars().take(slice_op.offset).collect(),
+            "left" => val.chars().take(slice_op.length).collect(),
             "right" => val
               .chars()
               .rev()
-              .take(slice_op.offset)
+              .take(slice_op.length)
               .collect::<String>()
               .chars()
               .rev()
@@ -565,15 +603,32 @@ fn process_operations(
       }
     }
 
+    // 先复制一份原始字段
+    let mut row_fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
     let mut string_results = Vec::new();
-    for string_op in &context.string_ops {
+    for (i, string_op) in context.string_ops.iter().enumerate() {
       if let Some(idx) = headers.iter().position(|h| h == &string_op.column) {
-        let cell = record.get(idx).unwrap_or("").to_string();
-        let new_val = match string_op.mode.as_str() {
+        let cell = row_fields[idx].clone();
+        match string_op.mode.as_str() {
+          "fill" => {
+            if cell.is_empty() {
+              row_fields[idx] = string_op.replacement.clone().unwrap_or_default();
+            }
+          }
+          "f-fill" => {
+            if cell.is_empty() {
+              if let Some(ref cache_val) = ffill_caches[i] {
+                row_fields[idx] = cache_val.clone();
+              }
+            } else {
+              ffill_caches[i] = Some(cell.clone());
+            }
+          }
+          // 其它 string 操作依然新增列
           "pinyin" => {
             let py_mode_string = string_op.replacement.clone().unwrap_or("none".to_owned());
             let py_mode = py_mode_string.as_str();
-            cell
+            let new_val = cell
               .chars()
               .map(|c| {
                 c.to_pinyin().map_or_else(
@@ -585,55 +640,58 @@ fn process_operations(
                   },
                 )
               })
-              .collect()
+              .collect();
+            string_results.push(new_val);
           }
-          "lower" => cell.to_lowercase(),
-          "upper" => cell.to_uppercase(),
-          "trim" => cell.trim().to_string(),
-          "ltrim" => cell.trim_start().to_string(),
-          "rtrim" => cell.trim_end().to_string(),
+          "lower" => string_results.push(cell.to_lowercase()),
+          "upper" => string_results.push(cell.to_uppercase()),
+          "trim" => string_results.push(cell.trim().to_string()),
+          "ltrim" => string_results.push(cell.trim_start().to_string()),
+          "rtrim" => string_results.push(cell.trim_end().to_string()),
           "replace" => {
             let comparand = string_op.comparand.as_deref().unwrap_or("");
             let replacement = string_op.replacement.as_deref().unwrap_or("");
-            cell.replace(comparand, replacement)
+            string_results.push(cell.replace(comparand, replacement));
           }
-          "len" => cell.chars().count().to_string(),
+          "len" => string_results.push(cell.chars().count().to_string()),
           "round" => {
             if let Ok(num) = cell.parse::<f64>() {
-              format!("{:.2}", num)
+              string_results.push(format!("{:.2}", num));
             } else {
-              cell
+              string_results.push(cell);
             }
           }
           "squeeze" => {
             let re = regex::Regex::new(r"\s+").unwrap();
-            re.replace_all(&cell, " ").into_owned()
+            string_results.push(re.replace_all(&cell, " ").into_owned());
           }
           "strip" => {
             let re = regex::Regex::new(r"[\r\n]+").unwrap();
-            re.replace_all(&cell, " ").into_owned()
+            string_results.push(re.replace_all(&cell, " ").into_owned());
           }
-          "reverse" => cell.chars().rev().collect(),
+          "reverse" => string_results.push(cell.chars().rev().collect()),
           "abs" => {
             if let Ok(num) = cell.parse::<f64>() {
-              num.abs().to_string()
+              string_results.push(num.abs().to_string());
             } else {
-              cell
+              string_results.push(cell);
             }
           }
           "neg" => {
             if let Ok(num) = cell.parse::<f64>() {
-              (-num).to_string()
+              string_results.push((-num).to_string());
             } else {
-              cell
+              string_results.push(cell);
             }
           }
-          "copy" => cell.clone(),
-          _ => cell,
-        };
-        string_results.push(new_val);
+          "copy" => string_results.push(cell.clone()),
+          _ => string_results.push(cell),
+        }
       } else {
-        string_results.push(String::new());
+        // 字段找不到时，string_results 追加空
+        if string_op.mode != "fill" && string_op.mode != "f-fill" {
+          string_results.push(String::new());
+        }
       }
     }
 
@@ -641,13 +699,13 @@ fn process_operations(
       if let Some(selected) = &context.select {
         let mut filtered: Vec<_> = selected
           .iter()
-          .map(|&idx| record.get(idx).unwrap_or(""))
+          .map(|&idx| row_fields.get(idx).map(|s| s.as_str()).unwrap_or(""))
           .collect();
         filtered.extend(slice_results.iter().map(|s| s.as_str()));
         filtered.extend(string_results.iter().map(|s| s.as_str()));
         writer.write_record(&filtered)?;
       } else {
-        let mut all_fields: Vec<_> = record.iter().map(|s| s).collect();
+        let mut all_fields: Vec<_> = row_fields.iter().map(|s| s.as_str()).collect();
         all_fields.extend(slice_results.iter().map(|s| s.as_str()));
         all_fields.extend(string_results.iter().map(|s| s.as_str()));
         writer.write_record(&all_fields)?;
