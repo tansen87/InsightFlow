@@ -496,8 +496,17 @@ fn process_operations(
       new_field_aliases.push(slice_name);
     }
     for string_op in &context.string_ops {
-      // fill 和 f-fill 不新增列
-      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+      // 这些操作不新增列，而是就地修改
+      if string_op.mode == "fill"
+        || string_op.mode == "f-fill"
+        || string_op.mode == "lower"
+        || string_op.mode == "upper"
+        || string_op.mode == "trim"
+        || string_op.mode == "ltrim"
+        || string_op.mode == "rtrim"
+        || string_op.mode == "squeeze"
+        || string_op.mode == "strip"
+      {
         continue;
       }
       let string_name = if let Some(ref alias) = string_op.alias {
@@ -522,7 +531,16 @@ fn process_operations(
 
     // 只为非 fill/f-fill 的 string_ops 新增列
     for string_op in &context.string_ops {
-      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+      if string_op.mode == "fill"
+        || string_op.mode == "f-fill"
+        || string_op.mode == "lower"
+        || string_op.mode == "upper"
+        || string_op.mode == "trim"
+        || string_op.mode == "ltrim"
+        || string_op.mode == "rtrim"
+        || string_op.mode == "squeeze"
+        || string_op.mode == "strip"
+      {
         continue;
       }
       let string_name = if let Some(ref alias) = string_op.alias {
@@ -546,7 +564,16 @@ fn process_operations(
     }
 
     for string_op in &context.string_ops {
-      if string_op.mode == "fill" || string_op.mode == "f-fill" {
+      if string_op.mode == "fill"
+        || string_op.mode == "f-fill"
+        || string_op.mode == "lower"
+        || string_op.mode == "upper"
+        || string_op.mode == "trim"
+        || string_op.mode == "ltrim"
+        || string_op.mode == "rtrim"
+        || string_op.mode == "squeeze"
+        || string_op.mode == "strip"
+      {
         continue;
       }
       let string_name = if let Some(ref alias) = string_op.alias {
@@ -624,7 +651,21 @@ fn process_operations(
               ffill_caches[i] = Some(cell.clone());
             }
           }
-          // 其它 string 操作依然新增列
+          // 这些操作就地修改，不新增列
+          "lower" => row_fields[idx] = cell.to_lowercase(),
+          "upper" => row_fields[idx] = cell.to_uppercase(),
+          "trim" => row_fields[idx] = cell.trim().to_string(),
+          "ltrim" => row_fields[idx] = cell.trim_start().to_string(),
+          "rtrim" => row_fields[idx] = cell.trim_end().to_string(),
+          "squeeze" => {
+            let re = regex::Regex::new(r"\s+").unwrap();
+            row_fields[idx] = re.replace_all(&cell, " ").into_owned();
+          }
+          "strip" => {
+            let re = regex::Regex::new(r"[\r\n]+").unwrap();
+            row_fields[idx] = re.replace_all(&cell, " ").into_owned();
+          }
+          // 其它 str 操作依然新增列
           "pinyin" => {
             let py_mode_string = string_op.replacement.clone().unwrap_or("none".to_owned());
             let py_mode = py_mode_string.as_str();
@@ -643,11 +684,6 @@ fn process_operations(
               .collect();
             string_results.push(new_val);
           }
-          "lower" => string_results.push(cell.to_lowercase()),
-          "upper" => string_results.push(cell.to_uppercase()),
-          "trim" => string_results.push(cell.trim().to_string()),
-          "ltrim" => string_results.push(cell.trim_start().to_string()),
-          "rtrim" => string_results.push(cell.trim_end().to_string()),
           "replace" => {
             let comparand = string_op.comparand.as_deref().unwrap_or("");
             let replacement = string_op.replacement.as_deref().unwrap_or("");
@@ -660,14 +696,6 @@ fn process_operations(
             } else {
               string_results.push(cell);
             }
-          }
-          "squeeze" => {
-            let re = regex::Regex::new(r"\s+").unwrap();
-            string_results.push(re.replace_all(&cell, " ").into_owned());
-          }
-          "strip" => {
-            let re = regex::Regex::new(r"[\r\n]+").unwrap();
-            string_results.push(re.replace_all(&cell, " ").into_owned());
           }
           "reverse" => string_results.push(cell.chars().rev().collect()),
           "abs" => {
@@ -688,8 +716,17 @@ fn process_operations(
           _ => string_results.push(cell),
         }
       } else {
-        // 字段找不到时，string_results 追加空
-        if string_op.mode != "fill" && string_op.mode != "f-fill" {
+        // 字段找不到时，只有新增列的操作才追加空字符串
+        if string_op.mode != "fill"
+          && string_op.mode != "f-fill"
+          && string_op.mode != "lower"
+          && string_op.mode != "upper"
+          && string_op.mode != "trim"
+          && string_op.mode != "ltrim"
+          && string_op.mode != "rtrim"
+          && string_op.mode != "squeeze"
+          && string_op.mode != "strip"
+        {
           string_results.push(String::new());
         }
       }
