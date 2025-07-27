@@ -11,8 +11,8 @@ struct Operation {
   mode: Option<String>,
   column: Option<String>,
   value: Option<String>,
-  offset: Option<usize>,
-  length: Option<usize>,
+  offset: Option<String>,
+  length: Option<String>,
   comparand: Option<String>,
   replacement: Option<String>,
   alias: Option<String>,
@@ -21,8 +21,8 @@ struct Operation {
 struct SliceOperation {
   column: String,
   mode: String,
-  offset: usize,
-  length: usize,
+  offset: String,
+  length: String,
   alias: Option<String>,
 }
 
@@ -73,8 +73,8 @@ impl ProcessingContext {
     &mut self,
     column: &str,
     mode: &str,
-    offset: usize,
-    length: usize,
+    offset: String,
+    length: String,
     alias: Option<String>,
   ) {
     self.slice_ops.push(SliceOperation {
@@ -454,8 +454,8 @@ fn process_operations(
       }
       "slice" => {
         if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
-          let offset = op.offset.unwrap_or(1);
-          let length = op.length.unwrap_or(1);
+          let offset = op.offset.clone().ok_or(anyhow!("offset is required"))?;
+          let length = op.length.clone().ok_or(anyhow!("length is required"))?;
           context.add_slice(col, mode, offset, length, op.alias.clone());
         }
       }
@@ -612,26 +612,36 @@ fn process_operations(
     let mut slice_results = Vec::new();
     for slice_op in &context.slice_ops {
       let idx = headers.iter().position(|h| h == &slice_op.column);
+      let length = slice_op.length.parse::<usize>()?;
       if let Some(idx) = idx {
         if let Some(val) = record.get(idx) {
           let new_val = match slice_op.mode.as_str() {
-            "left" => val.chars().take(slice_op.length).collect(),
+            "left" => val.chars().take(length).collect(),
             "right" => val
               .chars()
               .rev()
-              .take(slice_op.length)
+              .take(length)
               .collect::<String>()
               .chars()
               .rev()
               .collect(),
             "slice" => {
-              let start = slice_op.offset as isize - 1;
-              let end = start + slice_op.length as isize;
+              let offset = slice_op.offset.parse::<isize>()?;
+              let start = offset - 1;
+              let end = start + length as isize;
               val
                 .chars()
                 .skip(start.max(0) as usize)
                 .take((end - start) as usize)
                 .collect()
+            }
+            "split" => {
+              let split_parts: Vec<&str> = val.split(&slice_op.offset).collect();
+              if split_parts.len() >= length {
+                split_parts[length - 1].to_string()
+              } else {
+                "".to_string()
+              }
             }
             _ => val.to_string(),
           };
