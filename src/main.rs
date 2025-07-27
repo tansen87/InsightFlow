@@ -703,6 +703,12 @@ fn process_operations(
             let replacement = string_op.replacement.as_deref().unwrap_or("");
             string_results.push(cell.replace(comparand, replacement));
           }
+          "regex_replace" => {
+            let comparand = string_op.comparand.as_deref().unwrap_or("");
+            let replacement = string_op.replacement.as_deref().unwrap_or("");
+            let pattern = regex::RegexBuilder::new(comparand).build()?;
+            string_results.push(pattern.replace_all(&cell, replacement).to_string());
+          }
           "len" => string_results.push(cell.chars().count().to_string()),
           "round" => {
             if let Ok(num) = cell.parse::<f64>() {
