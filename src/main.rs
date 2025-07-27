@@ -2,8 +2,19 @@ use std::{fs::File, io::Read, path::Path};
 
 use anyhow::{Result, anyhow};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
+use dynfmt::{Format, SimpleCurlyFormat};
 use pinyin::ToPinyin;
+use regex::Regex;
 use serde::Deserialize;
+
+#[macro_export]
+macro_rules! regex_oncelock {
+  ($re:literal $(,)?) => {{
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    #[allow(clippy::regex_creation_in_loops)] // false positive as we use oncelock
+    RE.get_or_init(|| regex::Regex::new($re).expect("Invalid regex"))
+  }};
+}
 
 #[derive(Debug, Deserialize)]
 struct Operation {
@@ -460,21 +471,31 @@ fn process_operations(
         }
       }
       "str" => {
-        if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
-          context.add_string(
-            col,
-            mode,
-            op.comparand.clone(),
-            op.replacement.clone(),
-            op.alias.clone(),
-          );
+        if let Some(mode) = &op.mode {
+          if mode == "dynfmt" {
+            // dynfmt操作不需要column，直接使用comparand作为模板
+            context.add_string(
+              "",
+              mode,
+              op.comparand.clone(),
+              op.replacement.clone(),
+              op.alias.clone(),
+            );
+          } else if let Some(col) = &op.column {
+            context.add_string(
+              col,
+              mode,
+              op.comparand.clone(),
+              op.replacement.clone(),
+              op.alias.clone(),
+            );
+          }
         }
       }
       _ => return Err(anyhow!("not support operation: {}", op.op)),
     }
   }
 
-  // 创建输出文件和写入器
   let output_file = File::create(output_path)?;
   let mut writer = WriterBuilder::new().from_writer(output_file);
 
@@ -525,6 +546,8 @@ fn process_operations(
       }
       let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
+      } else if string_op.mode == "dynfmt" {
+        "_dynfmt".to_string()
       } else {
         format!("{}_{}", string_op.column, string_op.mode)
       };
@@ -559,6 +582,8 @@ fn process_operations(
       }
       let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
+      } else if string_op.mode == "dynfmt" {
+        "_dynfmt".to_string()
       } else {
         format!("{}_{}", string_op.column, string_op.mode)
       };
@@ -592,6 +617,8 @@ fn process_operations(
       }
       let string_name = if let Some(ref alias) = string_op.alias {
         alias.clone()
+      } else if string_op.mode == "dynfmt" {
+        "_dynfmt".to_string()
       } else {
         format!("{}_{}", string_op.column, string_op.mode)
       };
@@ -658,7 +685,42 @@ fn process_operations(
     let mut row_fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
     let mut string_results = Vec::new();
     for (i, string_op) in context.string_ops.iter().enumerate() {
-      if let Some(idx) = headers.iter().position(|h| h == &string_op.column) {
+      if string_op.mode == "dynfmt" {
+        // dynfmt操作不依赖特定列，直接处理整个记录
+        let template = string_op.comparand.as_deref().unwrap_or("");
+        let mut dynfmt_template_wrk = template.to_string();
+        let mut dynfmt_fields = Vec::new();
+
+        // first, get the fields used in the dynfmt template
+        let formatstr_re: &'static Regex = crate::regex_oncelock!(r"\{(?P<key>\w+)?\}");
+        for format_fields in formatstr_re.captures_iter(template) {
+          // safety: we already checked that the regex match is valid
+          if let Some(key) = format_fields.name("key") {
+            dynfmt_fields.push(key.as_str());
+          }
+        }
+        // we sort the fields so we can do binary_search
+        dynfmt_fields.sort_unstable();
+
+        // now, get the indices of the columns for the lookup vec
+        for (i, field) in headers.iter().enumerate() {
+          if dynfmt_fields.binary_search(&field.as_str()).is_ok() {
+            let field_with_curly = format!("{{{field}}}");
+            let field_index = format!("{{{i}}}");
+            dynfmt_template_wrk = dynfmt_template_wrk.replace(&field_with_curly, &field_index);
+          }
+        }
+
+        let mut record_vec: Vec<String> = Vec::with_capacity(record.len());
+        for field in &record {
+          record_vec.push(field.to_string());
+        }
+        if let Ok(formatted) = SimpleCurlyFormat.format(&dynfmt_template_wrk, record_vec) {
+          string_results.push(formatted.to_string());
+        } else {
+          string_results.push(String::new());
+        }
+      } else if let Some(idx) = headers.iter().position(|h| h == &string_op.column) {
         let cell = row_fields[idx].clone();
         match string_op.mode.as_str() {
           "fill" => {
@@ -756,6 +818,7 @@ fn process_operations(
           && string_op.mode != "rtrim"
           && string_op.mode != "squeeze"
           && string_op.mode != "strip"
+          && string_op.mode != "dynfmt"
         {
           string_results.push(String::new());
         }
