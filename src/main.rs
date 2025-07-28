@@ -22,22 +22,12 @@ struct Operation {
   mode: Option<String>,
   column: Option<String>,
   value: Option<String>,
-  offset: Option<String>,
-  length: Option<String>,
   comparand: Option<String>,
   replacement: Option<String>,
   alias: Option<String>,
 }
 
-struct SliceOperation {
-  column: String,
-  mode: String,
-  offset: String,
-  length: String,
-  alias: Option<String>,
-}
-
-struct StringOperation {
+struct StrOperation {
   column: String,
   mode: String,
   comparand: Option<String>,
@@ -49,8 +39,7 @@ struct ProcessingContext {
   select: Option<Vec<usize>>,
   alias: Option<Vec<Option<String>>>,
   filters: Vec<Box<dyn Fn(&StringRecord) -> bool + Send + Sync>>,
-  slice_ops: Vec<SliceOperation>,
-  string_ops: Vec<StringOperation>,
+  str_ops: Vec<StrOperation>,
 }
 
 impl ProcessingContext {
@@ -59,8 +48,7 @@ impl ProcessingContext {
       select: None,
       alias: None,
       filters: Vec::new(),
-      slice_ops: Vec::new(),
-      string_ops: Vec::new(),
+      str_ops: Vec::new(),
     }
   }
 
@@ -80,24 +68,7 @@ impl ProcessingContext {
     self.filters.push(Box::new(filter));
   }
 
-  fn add_slice(
-    &mut self,
-    column: &str,
-    mode: &str,
-    offset: String,
-    length: String,
-    alias: Option<String>,
-  ) {
-    self.slice_ops.push(SliceOperation {
-      column: column.to_string(),
-      mode: mode.to_string(),
-      offset,
-      length,
-      alias,
-    });
-  }
-
-  fn add_string(
+  fn add_str(
     &mut self,
     column: &str,
     mode: &str,
@@ -105,7 +76,7 @@ impl ProcessingContext {
     replacement: Option<String>,
     alias: Option<String>,
   ) {
-    self.string_ops.push(StringOperation {
+    self.str_ops.push(StrOperation {
       column: column.to_string(),
       mode: mode.to_string(),
       comparand,
@@ -463,18 +434,11 @@ fn process_operations(
           }
         }
       }
-      "slice" => {
-        if let (Some(col), Some(mode)) = (&op.column, &op.mode) {
-          let offset = op.offset.clone().ok_or(anyhow!("offset is required"))?;
-          let length = op.length.clone().ok_or(anyhow!("length is required"))?;
-          context.add_slice(col, mode, offset, length, op.alias.clone());
-        }
-      }
       "str" => {
         if let Some(mode) = &op.mode {
           if mode == "dynfmt" {
             // dynfmt操作不需要column，直接使用comparand作为模板
-            context.add_string(
+            context.add_str(
               "",
               mode,
               op.comparand.clone(),
@@ -482,7 +446,7 @@ fn process_operations(
               op.alias.clone(),
             );
           } else if let Some(col) = &op.column {
-            context.add_string(
+            context.add_str(
               col,
               mode,
               op.comparand.clone(),
@@ -520,72 +484,61 @@ fn process_operations(
     let mut new_field_names = Vec::new();
     let mut new_field_is_slice = Vec::new(); // true=slice, false=string
     let mut new_field_aliases = Vec::new();
-    for slice_op in &context.slice_ops {
-      let slice_name = if let Some(ref alias) = slice_op.alias {
-        alias.clone()
-      } else {
-        format!("{}_{}", slice_op.column, slice_op.mode)
-      };
-      new_field_names.push(slice_name.clone());
-      new_field_is_slice.push(true);
-      new_field_aliases.push(slice_name);
-    }
-    for string_op in &context.string_ops {
+
+    for str_op in &context.str_ops {
       // 这些操作不新增列，而是就地修改
-      if string_op.mode == "fill"
-        || string_op.mode == "f_fill"
-        || string_op.mode == "lower"
-        || string_op.mode == "upper"
-        || string_op.mode == "trim"
-        || string_op.mode == "ltrim"
-        || string_op.mode == "rtrim"
-        || string_op.mode == "squeeze"
-        || string_op.mode == "strip"
+      if str_op.mode == "fill"
+        || str_op.mode == "f_fill"
+        || str_op.mode == "lower"
+        || str_op.mode == "upper"
+        || str_op.mode == "trim"
+        || str_op.mode == "ltrim"
+        || str_op.mode == "rtrim"
+        || str_op.mode == "squeeze"
+        || str_op.mode == "strip"
+        || str_op.mode == "left"
+        || str_op.mode == "right"
+        || str_op.mode == "slice"
+        || str_op.mode == "split"
       {
         continue;
       }
-      let string_name = if let Some(ref alias) = string_op.alias {
+      let string_name = if let Some(ref alias) = str_op.alias {
         alias.clone()
-      } else if string_op.mode == "dynfmt" {
+      } else if str_op.mode == "dynfmt" {
         "_dynfmt".to_string()
       } else {
-        format!("{}_{}", string_op.column, string_op.mode)
+        format!("{}_{}", str_op.column, str_op.mode)
       };
       new_field_names.push(string_name.clone());
       new_field_is_slice.push(false);
       new_field_aliases.push(string_name);
     }
 
-    // 加入所有 slice 新字段名
-    for slice_op in &context.slice_ops {
-      let slice_name = if let Some(ref alias) = slice_op.alias {
-        alias.clone()
-      } else {
-        format!("{}_{}", slice_op.column, slice_op.mode)
-      };
-      selected_headers.push(slice_name);
-    }
-
-    // 只为非 fill/f_fill 的 string_ops 新增列
-    for string_op in &context.string_ops {
-      if string_op.mode == "fill"
-        || string_op.mode == "f_fill"
-        || string_op.mode == "lower"
-        || string_op.mode == "upper"
-        || string_op.mode == "trim"
-        || string_op.mode == "ltrim"
-        || string_op.mode == "rtrim"
-        || string_op.mode == "squeeze"
-        || string_op.mode == "strip"
+    // 只为非 fill/f_fill 的 str_ops 新增列
+    for str_op in &context.str_ops {
+      if str_op.mode == "fill"
+        || str_op.mode == "f_fill"
+        || str_op.mode == "lower"
+        || str_op.mode == "upper"
+        || str_op.mode == "trim"
+        || str_op.mode == "ltrim"
+        || str_op.mode == "rtrim"
+        || str_op.mode == "squeeze"
+        || str_op.mode == "strip"
+        || str_op.mode == "left"
+        || str_op.mode == "right"
+        || str_op.mode == "slice"
+        || str_op.mode == "split"
       {
         continue;
       }
-      let string_name = if let Some(ref alias) = string_op.alias {
+      let string_name = if let Some(ref alias) = str_op.alias {
         alias.clone()
-      } else if string_op.mode == "dynfmt" {
+      } else if str_op.mode == "dynfmt" {
         "_dynfmt".to_string()
       } else {
-        format!("{}_{}", string_op.column, string_op.mode)
+        format!("{}_{}", str_op.column, str_op.mode)
       };
       selected_headers.push(string_name);
     }
@@ -593,34 +546,30 @@ fn process_operations(
     writer.write_record(&selected_headers)?;
   } else {
     let mut all_headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-    for slice_op in &context.slice_ops {
-      let slice_name = if let Some(ref alias) = slice_op.alias {
-        alias.clone()
-      } else {
-        format!("{}_{}", slice_op.column, slice_op.mode)
-      };
-      all_headers.push(slice_name);
-    }
 
-    for string_op in &context.string_ops {
-      if string_op.mode == "fill"
-        || string_op.mode == "f_fill"
-        || string_op.mode == "lower"
-        || string_op.mode == "upper"
-        || string_op.mode == "trim"
-        || string_op.mode == "ltrim"
-        || string_op.mode == "rtrim"
-        || string_op.mode == "squeeze"
-        || string_op.mode == "strip"
+    for str_op in &context.str_ops {
+      if str_op.mode == "fill"
+        || str_op.mode == "f_fill"
+        || str_op.mode == "lower"
+        || str_op.mode == "upper"
+        || str_op.mode == "trim"
+        || str_op.mode == "ltrim"
+        || str_op.mode == "rtrim"
+        || str_op.mode == "squeeze"
+        || str_op.mode == "strip"
+        || str_op.mode == "left"
+        || str_op.mode == "right"
+        || str_op.mode == "slice"
+        || str_op.mode == "split"
       {
         continue;
       }
-      let string_name = if let Some(ref alias) = string_op.alias {
+      let string_name = if let Some(ref alias) = str_op.alias {
         alias.clone()
-      } else if string_op.mode == "dynfmt" {
+      } else if str_op.mode == "dynfmt" {
         "_dynfmt".to_string()
       } else {
-        format!("{}_{}", string_op.column, string_op.mode)
+        format!("{}_{}", str_op.column, str_op.mode)
       };
       all_headers.push(string_name);
     }
@@ -629,65 +578,19 @@ fn process_operations(
   }
 
   // 流式处理所有记录
-  // 初始化 f_fill 缓存（每个 string_op 一个）
-  let mut ffill_caches: Vec<Option<String>> = vec![None; context.string_ops.len()];
+  // 初始化 f_fill 缓存（每个 str_op 一个）
+  let mut ffill_caches: Vec<Option<String>> = vec![None; context.str_ops.len()];
 
   for result in reader.records() {
     let record = result?;
 
-    // 先收集所有 slice 结果
-    let mut slice_results = Vec::new();
-    for slice_op in &context.slice_ops {
-      let idx = headers.iter().position(|h| h == &slice_op.column);
-      let length = slice_op.length.parse::<usize>()?;
-      if let Some(idx) = idx {
-        if let Some(val) = record.get(idx) {
-          let new_val = match slice_op.mode.as_str() {
-            "left" => val.chars().take(length).collect(),
-            "right" => val
-              .chars()
-              .rev()
-              .take(length)
-              .collect::<String>()
-              .chars()
-              .rev()
-              .collect(),
-            "slice" => {
-              let offset = slice_op.offset.parse::<isize>()?;
-              let start = offset - 1;
-              let end = start + length as isize;
-              val
-                .chars()
-                .skip(start.max(0) as usize)
-                .take((end - start) as usize)
-                .collect()
-            }
-            "split" => {
-              let split_parts: Vec<&str> = val.split(&slice_op.offset).collect();
-              if split_parts.len() >= length {
-                split_parts[length - 1].to_string()
-              } else {
-                "".to_string()
-              }
-            }
-            _ => val.to_string(),
-          };
-          slice_results.push(new_val);
-        } else {
-          slice_results.push(String::new());
-        }
-      } else {
-        slice_results.push(String::new());
-      }
-    }
-
     // 先复制一份原始字段
     let mut row_fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-    let mut string_results = Vec::new();
-    for (i, string_op) in context.string_ops.iter().enumerate() {
-      if string_op.mode == "dynfmt" {
+    let mut str_results = Vec::new();
+    for (i, str_op) in context.str_ops.iter().enumerate() {
+      if str_op.mode == "dynfmt" {
         // dynfmt操作不依赖特定列，直接处理整个记录
-        let template = string_op.comparand.as_deref().unwrap_or("");
+        let template = str_op.comparand.as_deref().unwrap_or("");
         let mut dynfmt_template_wrk = template.to_string();
         let mut dynfmt_fields = Vec::new();
 
@@ -716,16 +619,21 @@ fn process_operations(
           record_vec.push(field.to_string());
         }
         if let Ok(formatted) = SimpleCurlyFormat.format(&dynfmt_template_wrk, record_vec) {
-          string_results.push(formatted.to_string());
+          str_results.push(formatted.to_string());
         } else {
-          string_results.push(String::new());
+          str_results.push(String::new());
         }
-      } else if let Some(idx) = headers.iter().position(|h| h == &string_op.column) {
+      } else if let Some(idx) = headers.iter().position(|h| h == &str_op.column) {
         let cell = row_fields[idx].clone();
-        match string_op.mode.as_str() {
+        let length = str_op
+          .replacement
+          .clone()
+          .ok_or(anyhow!("length is invalid number"))?
+          .parse::<usize>()?;
+        match str_op.mode.as_str() {
           "fill" => {
             if cell.is_empty() {
-              row_fields[idx] = string_op.replacement.clone().unwrap_or_default();
+              row_fields[idx] = str_op.replacement.clone().unwrap_or_default();
             }
           }
           "f_fill" => {
@@ -737,7 +645,6 @@ fn process_operations(
               ffill_caches[i] = Some(cell.clone());
             }
           }
-          // 这些操作就地修改，不新增列
           "lower" => row_fields[idx] = cell.to_lowercase(),
           "upper" => row_fields[idx] = cell.to_uppercase(),
           "trim" => row_fields[idx] = cell.trim().to_string(),
@@ -751,11 +658,10 @@ fn process_operations(
             let re = regex::Regex::new(r"[\r\n]+").unwrap();
             row_fields[idx] = re.replace_all(&cell, " ").into_owned();
           }
-          // 其它 str 操作依然新增列
           "pinyin" => {
-            let py_mode_string = string_op.replacement.clone().unwrap_or("none".to_owned());
+            let py_mode_string = str_op.replacement.clone().unwrap_or("none".to_owned());
             let py_mode = py_mode_string.as_str();
-            let new_val = cell
+            row_fields[idx] = cell
               .chars()
               .map(|c| {
                 c.to_pinyin().map_or_else(
@@ -768,59 +674,99 @@ fn process_operations(
                 )
               })
               .collect();
-            string_results.push(new_val);
           }
-          "replace" => {
-            let comparand = string_op.comparand.as_deref().unwrap_or("");
-            let replacement = string_op.replacement.as_deref().unwrap_or("");
-            string_results.push(cell.replace(comparand, replacement));
+          "left" => row_fields[idx] = cell.chars().take(length).collect(),
+          "right" => {
+            row_fields[idx] = cell
+              .chars()
+              .rev()
+              .take(length)
+              .collect::<String>()
+              .chars()
+              .rev()
+              .collect()
           }
-          "regex_replace" => {
-            let comparand = string_op.comparand.as_deref().unwrap_or("");
-            let replacement = string_op.replacement.as_deref().unwrap_or("");
-            let pattern = regex::RegexBuilder::new(comparand).build()?;
-            string_results.push(pattern.replace_all(&cell, replacement).to_string());
+          "slice" => {
+            let offset = str_op
+              .comparand
+              .clone()
+              .ok_or(anyhow!("start index is invalid number"))?
+              .parse::<isize>()?;
+            let start = offset - 1;
+            let end = start + length as isize;
+            row_fields[idx] = cell
+              .chars()
+              .skip(start.max(0) as usize)
+              .take((end - start) as usize)
+              .collect::<String>();
           }
-          "len" => string_results.push(cell.chars().count().to_string()),
-          "round" => {
-            if let Ok(num) = cell.parse::<f64>() {
-              string_results.push(format!("{:.2}", num));
+          "split" => {
+            let sep = &str_op
+              .comparand
+              .clone()
+              .ok_or(anyhow!("delimiter is invalid"))?;
+            let split_parts: Vec<&str> = cell.split(sep).collect();
+            if split_parts.len() >= length {
+              row_fields[idx] = split_parts[length - 1].to_string();
             } else {
-              string_results.push(cell);
+              row_fields[idx] = "".to_string();
             }
           }
-          "reverse" => string_results.push(cell.chars().rev().collect()),
+          "replace" => {
+            let comparand = str_op.comparand.as_deref().unwrap_or("");
+            let replacement = str_op.replacement.as_deref().unwrap_or("");
+            str_results.push(cell.replace(comparand, replacement));
+          }
+          "regex_replace" => {
+            let comparand = str_op.comparand.as_deref().unwrap_or("");
+            let replacement = str_op.replacement.as_deref().unwrap_or("");
+            let pattern = regex::RegexBuilder::new(comparand).build()?;
+            str_results.push(pattern.replace_all(&cell, replacement).to_string());
+          }
+          "len" => str_results.push(cell.chars().count().to_string()),
+          "round" => {
+            if let Ok(num) = cell.parse::<f64>() {
+              str_results.push(format!("{:.2}", num));
+            } else {
+              str_results.push(cell);
+            }
+          }
+          "reverse" => str_results.push(cell.chars().rev().collect()),
           "abs" => {
             if let Ok(num) = cell.parse::<f64>() {
-              string_results.push(num.abs().to_string());
+              str_results.push(num.abs().to_string());
             } else {
-              string_results.push(cell);
+              str_results.push(cell);
             }
           }
           "neg" => {
             if let Ok(num) = cell.parse::<f64>() {
-              string_results.push((-num).to_string());
+              str_results.push((-num).to_string());
             } else {
-              string_results.push(cell);
+              str_results.push(cell);
             }
           }
-          "copy" => string_results.push(cell.clone()),
-          _ => string_results.push(cell),
+          "copy" => str_results.push(cell.clone()),
+          _ => str_results.push(cell),
         }
       } else {
         // 字段找不到时，只有新增列的操作才追加空字符串
-        if string_op.mode != "fill"
-          && string_op.mode != "f_fill"
-          && string_op.mode != "lower"
-          && string_op.mode != "upper"
-          && string_op.mode != "trim"
-          && string_op.mode != "ltrim"
-          && string_op.mode != "rtrim"
-          && string_op.mode != "squeeze"
-          && string_op.mode != "strip"
-          && string_op.mode != "dynfmt"
+        if str_op.mode != "fill"
+          && str_op.mode != "f_fill"
+          && str_op.mode != "lower"
+          && str_op.mode != "upper"
+          && str_op.mode != "trim"
+          && str_op.mode != "ltrim"
+          && str_op.mode != "rtrim"
+          && str_op.mode != "squeeze"
+          && str_op.mode != "strip"
+          && str_op.mode != "dynfmt"
+          && str_op.mode == "left"
+          && str_op.mode == "right"
+          && str_op.mode == "slice"
+          && str_op.mode == "split"
         {
-          string_results.push(String::new());
+          str_results.push(String::new());
         }
       }
     }
@@ -831,13 +777,11 @@ fn process_operations(
           .iter()
           .map(|&idx| row_fields.get(idx).map(|s| s.as_str()).unwrap_or(""))
           .collect();
-        filtered.extend(slice_results.iter().map(|s| s.as_str()));
-        filtered.extend(string_results.iter().map(|s| s.as_str()));
+        filtered.extend(str_results.iter().map(|s| s.as_str()));
         writer.write_record(&filtered)?;
       } else {
         let mut all_fields: Vec<_> = row_fields.iter().map(|s| s.as_str()).collect();
-        all_fields.extend(slice_results.iter().map(|s| s.as_str()));
-        all_fields.extend(string_results.iter().map(|s| s.as_str()));
+        all_fields.extend(str_results.iter().map(|s| s.as_str()));
         writer.write_record(&all_fields)?;
       }
     }
@@ -864,7 +808,6 @@ fn main() -> Result<()> {
   file.read_to_string(&mut json_str)?;
 
   let operations: Vec<Operation> = serde_json::from_str(&json_str)?;
-  // let input_path = Path::new("E:/Desktop/test_data/insightSQL_data/bigfile/cat.csv");
   let input_path = Path::new("tsearch.csv");
   let output_path = Path::new("tsearch.output.csv");
 
