@@ -625,11 +625,14 @@ fn process_operations(
         }
       } else if let Some(idx) = headers.iter().position(|h| h == &str_op.column) {
         let cell = row_fields[idx].clone();
-        let length = str_op
-          .replacement
-          .clone()
-          .ok_or(anyhow!("length is invalid number"))?
-          .parse::<usize>()?;
+        let length = match str_op.mode.as_str() {
+          "left" | "right" | "slice" | "split" => str_op
+            .replacement
+            .clone()
+            .ok_or(anyhow!("length is invalid number"))?
+            .parse::<usize>()?,
+          _ => 0,
+        };
         match str_op.mode.as_str() {
           "fill" => {
             if cell.is_empty() {
